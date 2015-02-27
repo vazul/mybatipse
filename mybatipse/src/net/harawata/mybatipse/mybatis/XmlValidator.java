@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.xml.xpath.XPathExpressionException;
 
@@ -26,7 +28,6 @@ import net.harawata.mybatipse.util.XpathUtil;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IResource;
-import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.OperationCanceledException;
@@ -42,11 +43,13 @@ import org.eclipse.wst.sse.core.internal.provisional.text.IStructuredDocument;
 import org.eclipse.wst.validation.AbstractValidator;
 import org.eclipse.wst.validation.ValidationResult;
 import org.eclipse.wst.validation.ValidationState;
+import org.eclipse.wst.validation.ValidatorMessage;
 import org.eclipse.wst.validation.internal.provisional.core.IReporter;
 import org.eclipse.wst.xml.core.internal.provisional.document.IDOMAttr;
 import org.eclipse.wst.xml.core.internal.provisional.document.IDOMDocument;
 import org.eclipse.wst.xml.core.internal.provisional.document.IDOMElement;
 import org.eclipse.wst.xml.core.internal.provisional.document.IDOMModel;
+import org.eclipse.wst.xml.core.internal.provisional.document.IDOMText;
 import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
@@ -81,6 +84,8 @@ public class XmlValidator extends AbstractValidator
 		"arg", "resultMap", "collection", "association", "select", "insert", "update", "delete",
 		"include", "cache", "typeAlias", "typeHandler", "objectFactory", "objectWrapperFactory",
 		"plugin", "transactionManager", "mapper", "package", "databaseIdProvider");;
+
+	private static Pattern statementTextPropertyRefPattern = Pattern.compile("[#$]\\{*([^{}]*)\\}");
 
 	public void cleanup(IReporter reporter)
 	{
@@ -240,6 +245,139 @@ public class XmlValidator extends AbstractValidator
 			if (child instanceof IDOMElement)
 			{
 				validateElement(project, (IDOMElement)child, file, doc, reporter, result);
+			}
+			else if (child instanceof IDOMText)
+			{
+				validateTextMayContainPropertyRefs(project, (IDOMText)child, file, doc, reporter,
+					result);
+			}
+		}
+	}
+
+	private void validateTextMayContainPropertyRefs(IJavaProject project, IDOMText child,
+		IFile file, IDOMDocument doc, IReporter reporter, ValidationResult result)
+	{
+		Node statementNode = MybatipseXmlUtil.findEnclosingStatementNode(child.getParentNode());
+		if (statementNode != null)
+		{
+			// found enclosing statement node
+			String statementId = null;
+			NamedNodeMap statementAttrs = statementNode.getAttributes();
+			for (int i = 0; i < statementAttrs.getLength(); i++)
+			{
+				Node attr = statementAttrs.item(i);
+				String attrName = attr.getNodeName();
+				if ("id".equals(attrName))
+					statementId = attr.getNodeValue();
+			}
+
+			if (statementId != null && !statementId.isEmpty())
+			{
+				// found statmenet id, check method
+				String mapperFqn = null;
+				try
+				{
+					mapperFqn = MybatipseXmlUtil.getNamespace(statementNode.getOwnerDocument());
+				}
+				catch (XPathExpressionException e)
+				{
+					Activator.log(Status.ERROR, e.getMessage(), e);
+				}
+
+				final List<MapperMethodInfo> methodInfos = new ArrayList<MapperMethodInfo>();
+				JavaMapperUtil.findMapperMethod(methodInfos, project, mapperFqn, statementId, true,
+					true);
+
+				if (methodInfos.size() > 0)
+				{
+					// found method, can validate
+					String textContent = child.getTextContent();
+					int startOffset = child.getStartStructuredDocumentRegion().getStartOffset();
+					Matcher matcher = statementTextPropertyRefPattern.matcher(textContent);
+					while (matcher.find())
+					{
+						String property = matcher.group(1);
+						int propertyStartOffset = matcher.start(1);
+						int colon = property.indexOf(',');
+						if (colon >= 0)
+						{
+							property = property.substring(0, colon);
+						}
+						validatePropertyRef(project, methodInfos.get(0).getParams(), mapperFqn + "."
+							+ statementId, file, doc, result, startOffset, property, propertyStartOffset);
+					}
+				}
+			}
+		}
+	}
+
+	private void validatePropertyRef(IJavaProject project, Map<String, String> paramMap,
+		String mapperMethod, IFile file, IDOMDocument doc, ValidationResult result,
+		int startOffset, String property, int propertyStartOffset)
+	{
+		int propertyLength = property.length();
+		property = property.trim();
+
+		if (paramMap.size() == 1)
+		{
+			// If there is only one parameter with no @Param,
+			// properties should be directly referenced.
+			String paramType = paramMap.values().iterator().next();
+			Map<String, String> fields = BeanPropertyCache.searchFields(project, paramType, property,
+				true, -1, true);
+			int lastDot = property.lastIndexOf('.');
+			String matchProperty = lastDot < 0 ? property : property.substring(lastDot + 1);
+			if (!fields.containsKey(matchProperty))
+			{
+				// not valid property
+				addMarker(result, file, doc.getStructuredDocument(), startOffset + propertyStartOffset,
+					propertyLength, property, MISSING_TYPE, IMarker.SEVERITY_ERROR,
+					IMarker.PRIORITY_HIGH, "Property '" + property + "' not found in class " + paramType);
+			}
+		}
+		else if (paramMap.size() > 1)
+		{
+			int dotPos = property.indexOf('.');
+			if (dotPos == -1)
+			{
+				if (!paramMap.keySet().contains(property))
+				{
+					// not valid parameter
+					addMarker(result, file, doc.getStructuredDocument(), startOffset
+						+ propertyStartOffset, propertyLength, property, MISSING_TYPE,
+						IMarker.SEVERITY_ERROR, IMarker.PRIORITY_HIGH, "Parameter '" + property
+							+ "' not found as @Param in method " + mapperMethod);
+				}
+			}
+			else
+			{
+				String paramName = property.substring(0, dotPos);
+				String paramType = paramMap.get(paramName);
+				if (paramType == null)
+				{
+					// not valid parameter
+					addMarker(result, file, doc.getStructuredDocument(), startOffset
+						+ propertyStartOffset, propertyLength, property, MISSING_TYPE,
+						IMarker.SEVERITY_ERROR, IMarker.PRIORITY_HIGH, "Parameter '" + paramName
+							+ "' not found as @Param in method " + mapperMethod);
+				}
+				else
+				{
+					// check type
+					property = property.substring(dotPos + 1);
+					Map<String, String> fields = BeanPropertyCache.searchFields(project, paramType,
+						property, true, -1, true);
+					int lastDot = property.lastIndexOf('.');
+					String matchProperty = lastDot < 0 ? property : property.substring(lastDot + 1);
+					if (!fields.containsKey(matchProperty))
+					{
+						// not valid property
+						addMarker(result, file, doc.getStructuredDocument(), startOffset
+							+ propertyStartOffset, propertyLength, property, MISSING_TYPE,
+							IMarker.SEVERITY_ERROR, IMarker.PRIORITY_HIGH, "Property '" + property
+								+ "' not found in class " + paramType);
+					}
+				}
 			}
 		}
 	}
@@ -452,32 +590,30 @@ public class XmlValidator extends AbstractValidator
 	private void addMarker(ValidationResult result, IFile file, IStructuredDocument doc,
 		IDOMAttr attr, String problemType, int severity, int priority, String message)
 	{
-		int start = attr.getValueRegionStartOffset();
-		int length = attr.getValueRegionText().length();
-		int lineNo = doc.getLineOfOffset(start);
-		try
+		addMarker(result, file, doc, attr.getValueRegionStartOffset(), attr.getValueRegionText()
+			.length(), attr.getValue(), problemType, severity, priority, message);
+	}
+
+	private void addMarker(ValidationResult result, IFile file, IStructuredDocument doc,
+		int start, int length, String errorValue, String problemType, int severity, int priority,
+		String message)
+	{
+		int lineNo = doc.getLineOfOffset(start) + 1;
+		ValidatorMessage marker = ValidatorMessage.create(message, file);
+		marker.setType(MARKER_ID);
+		marker.setAttribute(IMarker.SEVERITY, severity);
+		marker.setAttribute(IMarker.PRIORITY, priority);
+		marker.setAttribute(IMarker.MESSAGE, message);
+		marker.setAttribute(IMarker.LINE_NUMBER, lineNo);
+		if (start != 0)
 		{
-			// ValidatorMessage marker = ValidatorMessage.create(message, file);
-			// marker.setType(MARKER_ID);
-			IMarker marker = file.createMarker(MARKER_ID);
-			marker.setAttribute(IMarker.SEVERITY, severity);
-			marker.setAttribute(IMarker.PRIORITY, priority);
-			marker.setAttribute(IMarker.MESSAGE, message);
-			marker.setAttribute(IMarker.LINE_NUMBER, lineNo);
-			if (start != 0)
-			{
-				marker.setAttribute(IMarker.CHAR_START, start);
-				marker.setAttribute(IMarker.CHAR_END, start + length);
-			}
-			// Adds custom attributes.
-			marker.setAttribute("problemType", problemType);
-			marker.setAttribute("errorValue", attr.getValue());
-			// result.add(marker);
+			marker.setAttribute(IMarker.CHAR_START, start);
+			marker.setAttribute(IMarker.CHAR_END, start + length);
 		}
-		catch (CoreException e)
-		{
-			Activator.log(Status.ERROR, e.getMessage(), e);
-		}
+		// Adds custom attributes.
+		marker.setAttribute("problemType", problemType);
+		marker.setAttribute("errorValue", errorValue);
+		result.add(marker);
 	}
 
 	private boolean isElementExists(IFile file, String xpath)
