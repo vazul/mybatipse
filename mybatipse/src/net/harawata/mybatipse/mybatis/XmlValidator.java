@@ -506,7 +506,7 @@ public class XmlValidator extends AbstractValidator
 		if (mapperType != null && !mapperMethodExists(project, qualifiedName, attrValue))
 		{
 			addMarker(result, file, doc.getStructuredDocument(), attr, MISSING_STATEMENT_METHOD,
-				IMarker.SEVERITY_WARNING, IMarker.PRIORITY_HIGH, "Method '" + attrValue
+				IMarker.SEVERITY_ERROR, IMarker.PRIORITY_HIGH, "Method '" + attrValue
 					+ "' not found or there is an overload method"
 					+ " (same name with different parameters) in mapper interface " + qualifiedName);
 		}

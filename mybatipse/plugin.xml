@@ -157,7 +157,7 @@
       <specification
             annotationType="net.harawata.mybatipse.XmlProblemAnnotation"
             colorPreferenceKey="net.harawata.mybatipse.XmlProblem.color"
-            colorPreferenceValue="255,192,38"
+            colorPreferenceValue="255,0,0"
             contributesToHeader="true"
             highlightPreferenceKey="net.harawata.mybatipse.XmlProblem.highlight"
             highlightPreferenceValue="false"
