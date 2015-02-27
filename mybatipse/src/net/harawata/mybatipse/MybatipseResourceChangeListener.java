@@ -11,7 +11,9 @@
 
 package net.harawata.mybatipse;
 
-import static net.harawata.mybatipse.MybatipseConstants.*;
+import static net.harawata.mybatipse.MybatipseConstants.configContentType;
+import static net.harawata.mybatipse.MybatipseConstants.mapperContentType;
+import static net.harawata.mybatipse.MybatipseConstants.springConfigContentType;
 import net.harawata.mybatipse.bean.BeanPropertyCache;
 import net.harawata.mybatipse.mybatis.ConfigRegistry;
 import net.harawata.mybatipse.mybatis.MapperNamespaceCache;
@@ -26,7 +28,10 @@ import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.IResourceDeltaVisitor;
 import org.eclipse.core.resources.IWorkspace;
 import org.eclipse.core.resources.IncrementalProjectBuilder;
+import org.eclipse.core.resources.WorkspaceJob;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.content.IContentDescription;
 import org.eclipse.core.runtime.content.IContentType;
@@ -34,13 +39,14 @@ import org.eclipse.jdt.core.ICompilationUnit;
 import org.eclipse.jdt.core.IType;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.JavaModelException;
+import org.eclipse.wst.validation.ValidationFramework;
 
 /**
  * @author Iwao AVE!
  */
 public class MybatipseResourceChangeListener implements IResourceChangeListener
 {
-	public void resourceChanged(IResourceChangeEvent event)
+	public void resourceChanged(final IResourceChangeEvent event)
 	{
 		if (event.getType() == IResourceChangeEvent.PRE_BUILD
 			&& event.getBuildKind() == IncrementalProjectBuilder.CLEAN_BUILD)
@@ -142,6 +148,23 @@ public class MybatipseResourceChangeListener implements IResourceChangeListener
 					{
 						TypeAliasCache.getInstance().put(project.getName(), type, simpleTypeName);
 					}
+				}
+
+				final IFile mapperFile = MapperNamespaceCache.getInstance().get(
+					JavaCore.create(project), qualifiedName, null);
+				if (mapperFile != null)
+				{
+					// validate corresponding mapper xml file:
+					WorkspaceJob job = new WorkspaceJob("Validating " + mapperFile)
+					{
+						@Override
+						public IStatus runInWorkspace(IProgressMonitor monitor) throws CoreException
+						{
+							ValidationFramework.getDefault().validate(mapperFile, monitor);
+							return Status.OK_STATUS;
+						}
+					};
+					job.schedule();
 				}
 			}
 
