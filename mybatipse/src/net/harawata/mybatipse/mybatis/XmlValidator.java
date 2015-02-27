@@ -87,11 +87,38 @@ public class XmlValidator extends AbstractValidator
 		// Nothing to do.
 	}
 
+	/**
+	 * Determine if a given file should be validated: Should validate if not derived, not team
+	 * private or not in such folder, is accessible and does not start with a dot. Code copied
+	 * from AbstractNestedValidator
+	 * 
+	 * @param file The file that may be validated.
+	 * @return True if the file should be validated, false otherwise.
+	 */
+	private static boolean shouldValidate(IResource file)
+	{
+		IResource resource = file;
+		do
+		{
+			if (resource.isDerived() || resource.isTeamPrivateMember() || !resource.isAccessible()
+				|| resource.getName().charAt(0) == '.')
+			{
+				return false;
+			}
+			resource = resource.getParent();
+		}
+		while ((resource.getType() & IResource.PROJECT) == 0);
+
+		return true;
+	}
+
 	@Override
 	public ValidationResult validate(final IResource resource, int kind, ValidationState state,
 		IProgressMonitor monitor)
 	{
 		if (resource.getType() != IResource.FILE)
+			return null;
+		if (!shouldValidate(resource))
 			return null;
 		ValidationResult result = new ValidationResult();
 		final IReporter reporter = result.getReporter(monitor);
