@@ -85,7 +85,7 @@ public class XmlValidator extends AbstractValidator
 		"include", "cache", "typeAlias", "typeHandler", "objectFactory", "objectWrapperFactory",
 		"plugin", "transactionManager", "mapper", "package", "databaseIdProvider");;
 
-	private static Pattern statementTextPropertyRefPattern = Pattern.compile("[#$]\\{*([^{}]*)\\}");
+	private static Pattern statementTextPropertyRefPattern = Pattern.compile("[#$]\\{[\\s]*([^,}\\s]*)[\\s]*[,}]");
 
 	public void cleanup(IReporter reporter)
 	{
@@ -298,11 +298,6 @@ public class XmlValidator extends AbstractValidator
 					{
 						String property = matcher.group(1);
 						int propertyStartOffset = matcher.start(1);
-						int colon = property.indexOf(',');
-						if (colon >= 0)
-						{
-							property = property.substring(0, colon);
-						}
 						validatePropertyRef(project, methodInfos.get(0).getParams(), mapperFqn + "."
 							+ statementId, file, doc, result, startOffset, property, propertyStartOffset);
 					}
@@ -316,7 +311,6 @@ public class XmlValidator extends AbstractValidator
 		int startOffset, String property, int propertyStartOffset)
 	{
 		int propertyLength = property.length();
-		property = property.trim();
 
 		if (paramMap.size() == 1)
 		{
