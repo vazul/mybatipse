@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
@@ -109,7 +110,8 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 			contentAssistRequest = new ContentAssistRequest(xmlnode, parentNode,
 				ContentAssistUtils.getStructuredDocumentRegion(viewer, offset), completionRegion,
 				offset, 0, matchString);
-			proposeStatementText(contentAssistRequest, statementNode);
+			proposeStatementText(contentAssistRequest, statementNode,
+				MybatipseXmlUtil.findEnclosingForEachNode(parentNode));
 		}
 		return contentAssistRequest;
 	}
@@ -142,11 +144,12 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		Node statementNode = MybatipseXmlUtil.findEnclosingStatementNode(parentNode);
 		if (statementNode == null)
 			return;
-		proposeStatementText(contentAssistRequest, statementNode);
+		proposeStatementText(contentAssistRequest, statementNode,
+			MybatipseXmlUtil.findEnclosingForEachNode(parentNode));
 	}
 
 	private void proposeStatementText(ContentAssistRequest contentAssistRequest,
-		Node statementNode)
+		Node statementNode, Node forEachNode)
 	{
 		int offset = contentAssistRequest.getReplacementBeginPosition();
 		String text = contentAssistRequest.getText();
@@ -164,8 +167,10 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 				addProposals(contentAssistRequest,
 					ProposalComputorHelper.proposeOptionName(offset, length, matchString));
 			else if ("property".equals(proposalTarget))
-				addProposals(contentAssistRequest,
-					proposeParameter(project, offset, length, statementNode, true, matchString));
+				addProposals(
+					contentAssistRequest,
+					proposeParameter(project, offset, length, statementNode, forEachNode, true,
+						matchString));
 			else if ("jdbcType".equals(proposalTarget))
 				addProposals(contentAssistRequest,
 					ProposalComputorHelper.proposeJdbcType(offset, length, matchString));
@@ -179,7 +184,8 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 	}
 
 	private List<ICompletionProposal> proposeParameter(IJavaProject project, final int offset,
-		final int length, Node statementNode, final boolean searchReadable, final String matchString)
+		final int length, Node statementNode, Node forEachNode, final boolean searchReadable,
+		final String matchString)
 	{
 		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
 		if (statementNode == null)
@@ -199,11 +205,41 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		if (statementId == null || statementId.length() == 0)
 			return proposals;
 
+		String forEachItem = null;
+		String forEachCollection = null;
+		if (forEachNode != null)
+		{
+			NamedNodeMap forEachAttrs = forEachNode.getAttributes();
+			for (int i = 0; i < forEachAttrs.getLength(); i++)
+			{
+				Node attr = forEachAttrs.item(i);
+				String attrName = attr.getNodeName();
+				if ("item".equals(attrName))
+					forEachItem = attr.getNodeValue();
+				else if ("collection".equals(attrName))
+					forEachCollection = attr.getNodeValue();
+			}
+		}
+
 		if (paramType != null)
 		{
 			String resolved = TypeAliasCache.getInstance().resolveAlias(project, paramType, null);
 			proposals = ProposalComputorHelper.proposePropertyFor(project, offset, length,
 				resolved != null ? resolved : paramType, searchReadable, -1, matchString);
+			if (forEachCollection != null && !forEachCollection.isEmpty())
+			{
+				// add item proposal
+				String forEachCollectionType = getForEachType(project,
+					Collections.singletonMap("value", paramType), forEachCollection);
+				if (forEachCollectionType != null)
+				{
+					List<ICompletionProposal> forEachProposals = ProposalComputorHelper.proposeParameters(
+						project, offset, length,
+						Collections.singletonMap(forEachItem, forEachCollectionType), searchReadable,
+						matchString, true);
+					proposals.addAll(forEachProposals);
+				}
+			}
 		}
 		else
 		{
@@ -216,7 +252,20 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 				if (methodInfos.size() > 0)
 				{
 					proposals = ProposalComputorHelper.proposeParameters(project, offset, length,
-						methodInfos.get(0).getParams(), searchReadable, matchString);
+						methodInfos.get(0).getParams(), searchReadable, matchString, false);
+					if (forEachCollection != null && !forEachCollection.isEmpty())
+					{
+						String forEachCollectionType = getForEachType(project, methodInfos.get(0)
+							.getParams(), forEachCollection);
+						if (forEachCollectionType != null)
+						{
+							List<ICompletionProposal> forEachProposals = ProposalComputorHelper.proposeParameters(
+								project, offset, length,
+								Collections.singletonMap(forEachItem, forEachCollectionType), searchReadable,
+								matchString, true);
+							proposals.addAll(forEachProposals);
+						}
+					}
 				}
 			}
 			catch (XPathExpressionException e)
@@ -225,6 +274,57 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 			}
 		}
 		return proposals;
+	}
+
+	private String getForEachType(IJavaProject project, Map<String, String> paramMap,
+		String collectionProperty)
+	{
+		String collectionType = null;
+
+		if (paramMap.size() == 1)
+		{
+			// If there is only one parameter with no @Param,
+			// properties should be directly referenced.
+			String paramType = paramMap.values().iterator().next();
+			Map<String, String> fields = BeanPropertyCache.searchFields(project, paramType,
+				collectionProperty, true, -1, true);
+			// should be one field
+			if (fields.size() == 1)
+			{
+				collectionType = fields.values().iterator().next();
+			}
+
+		}
+		else if (paramMap.size() > 1)
+		{
+			int dotPos = collectionProperty.indexOf('.');
+			if (dotPos == -1)
+			{
+				collectionType = paramMap.get(collectionProperty);
+			}
+			else
+			{
+				String paramName = collectionProperty.substring(0, dotPos);
+				String qualifiedName = paramMap.get(paramName);
+				if (qualifiedName != null)
+				{
+					String property = collectionProperty.substring(dotPos + 1);
+					Map<String, String> fields = BeanPropertyCache.searchFields(project, qualifiedName,
+						property, true, -1, true);
+					// should be one field
+					if (fields.size() == 1)
+					{
+						collectionType = fields.values().iterator().next();
+					}
+				}
+			}
+		}
+
+		if (collectionType.endsWith("[]"))
+			collectionType = collectionType.substring(0, collectionType.length() - 2);
+		else if (collectionType.startsWith("java.util.List<"))
+			collectionType = collectionType.substring(15, collectionType.length() - 1);
+		return collectionType;
 	}
 
 	private void generateResults(ContentAssistRequest contentAssistRequest, int offset,
@@ -384,13 +484,13 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 					Node statementNode = "update".equals(nodeName) || "insert".equals(nodeName) ? node
 						: MybatipseXmlUtil.findEnclosingStatementNode(node.getParentNode());
 					addProposals(contentAssistRequest,
-						proposeParameter(project, start, length, statementNode, false, matchString));
+						proposeParameter(project, start, length, statementNode, null, false, matchString));
 					break;
 				case ParamProperty:
 					addProposals(
 						contentAssistRequest,
 						proposeParameter(project, start, length,
-							MybatipseXmlUtil.findEnclosingStatementNode(node), true, matchString));
+							MybatipseXmlUtil.findEnclosingStatementNode(node), null, true, matchString));
 					break;
 				case ParamPropertyPartial:
 					AttrTextParser parser = new AttrTextParser(currentValue, matchString.length());
@@ -398,7 +498,7 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 						contentAssistRequest,
 						proposeParameter(project, start + parser.getMatchStringStart(),
 							parser.getReplacementLength(),
-							MybatipseXmlUtil.findEnclosingStatementNode(node.getParentNode()), true,
+							MybatipseXmlUtil.findEnclosingStatementNode(node.getParentNode()), null, true,
 							parser.getMatchString()));
 					break;
 				default:

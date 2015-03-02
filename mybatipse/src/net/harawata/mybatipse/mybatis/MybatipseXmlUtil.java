@@ -216,6 +216,19 @@ public class MybatipseXmlUtil
 		return null;
 	}
 
+	public static Node findEnclosingForEachNode(Node parentNode)
+	{
+		try
+		{
+			return XpathUtil.xpathNode(parentNode, "ancestor-or-self::foreach");
+		}
+		catch (XPathExpressionException e)
+		{
+			Activator.log(Status.ERROR, e.getMessage(), e);
+		}
+		return null;
+	}
+
 	public static String findEnclosingType(Node node)
 	{
 		String type = null;

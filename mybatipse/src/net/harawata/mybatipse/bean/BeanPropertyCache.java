@@ -311,10 +311,19 @@ public class BeanPropertyCache
 			for (Entry<String, String> entry : fields.entrySet())
 			{
 				final String fieldName = entry.getKey();
-				final String fieldQualifiedName = entry.getValue();
+				String fieldQualifiedName = entry.getValue();
 
 				if (matched(fieldName, searchStr, isPrefixMatch))
 				{
+					if (bracePos > -1)
+					{
+						if (fieldQualifiedName.endsWith("[]"))
+							fieldQualifiedName = fieldQualifiedName.substring(0,
+								fieldQualifiedName.length() - 2);
+						else if (fieldQualifiedName.startsWith("java.util.List<"))
+							fieldQualifiedName = fieldQualifiedName.substring(15,
+								fieldQualifiedName.length() - 1);
+					}
 					if (dotIdx > -1)
 					{
 						return searchFields(project, fieldQualifiedName, matchStr, searchReadable, dotIdx,

@@ -230,18 +230,29 @@ public class ProposalComputorHelper
 
 	public static List<ICompletionProposal> proposeParameters(IJavaProject project,
 		final int offset, final int length, final Map<String, String> paramMap,
-		final boolean searchReadable, final String matchString)
+		final boolean searchReadable, final String matchString, final boolean forceParams)
 	{
 		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
-		if (paramMap.size() == 1)
+		if (paramMap.size() == 1 && !forceParams)
 		{
 			// If there is only one parameter with no @Param,
 			// properties should be directly referenced.
 			String paramType = paramMap.values().iterator().next();
 			proposals = proposePropertyFor(project, offset, length, paramType, searchReadable, -1,
 				matchString);
+			if (proposals.size() == 0 && matchString.indexOf('.') < 0)
+			{
+				// if no proposal, then propose paramName
+				String paramName = paramMap.keySet().iterator().next();
+				if (paramName.startsWith(matchString))
+				{
+					proposals.add(new JavaCompletionProposal(paramName, offset, length,
+						paramName.length(), Activator.getIcon(), paramName + " - " + paramType, null, null,
+						0));
+				}
+			}
 		}
-		else if (paramMap.size() > 1)
+		else if (paramMap.size() > 1 || forceParams)
 		{
 			int dotPos = matchString.indexOf('.');
 			if (dotPos == -1)

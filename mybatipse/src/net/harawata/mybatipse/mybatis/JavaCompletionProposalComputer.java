@@ -142,7 +142,7 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 				if (methodInfos.size() > 0)
 				{
 					return ProposalComputorHelper.proposeParameters(project, offset, length,
-						methodInfos.get(0).getParams(), true, matchString);
+						methodInfos.get(0).getParams(), true, matchString, false);
 				}
 			}
 			else if ("jdbcType".equals(proposalTarget))

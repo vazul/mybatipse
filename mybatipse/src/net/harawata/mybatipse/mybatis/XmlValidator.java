@@ -13,8 +13,11 @@ package net.harawata.mybatipse.mybatis;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -83,7 +86,10 @@ public class XmlValidator extends AbstractValidator
 	private static final List<String> validatableTags = Arrays.asList("id", "idArg", "result",
 		"arg", "resultMap", "collection", "association", "select", "insert", "update", "delete",
 		"include", "cache", "typeAlias", "typeHandler", "objectFactory", "objectWrapperFactory",
-		"plugin", "transactionManager", "mapper", "package", "databaseIdProvider");;
+		"plugin", "transactionManager", "mapper", "package", "databaseIdProvider", "foreach");
+
+	private static final Set<String> validatableTextTags = new HashSet<String>(Arrays.asList(
+		"select", "insert", "update", "delete", "if", "foreach", "when", "otherwise"));
 
 	private static Pattern statementTextPropertyRefPattern = Pattern.compile("[#$]\\{[\\s]*([^,}\\s]*)[\\s]*[,}]");
 
@@ -153,7 +159,8 @@ public class XmlValidator extends AbstractValidator
 				Node child = nodes.item(k);
 				if (child instanceof IDOMElement)
 				{
-					validateElement(project, (IDOMElement)child, file, domDoc, reporter, result);
+					validateElement(project, (IDOMElement)child, file, domDoc, reporter, result,
+						MybatipseXmlUtil.getNamespace(domDoc), null, null, null);
 				}
 			}
 		}
@@ -171,7 +178,8 @@ public class XmlValidator extends AbstractValidator
 	}
 
 	private void validateElement(IJavaProject project, IDOMElement element, IFile file,
-		IDOMDocument doc, IReporter reporter, ValidationResult result) throws JavaModelException,
+		IDOMDocument doc, IReporter reporter, ValidationResult result, String namespace,
+		Node statementNode, String forEachItem, String forEachType) throws JavaModelException,
 		XPathExpressionException
 	{
 		if ((reporter != null) && (reporter.isCancelled() == true))
@@ -206,22 +214,36 @@ public class XmlValidator extends AbstractValidator
 				{
 					validateProperty(element, file, doc, result, project, attr, attrValue, reporter);
 				}
+				else if ("collection".equals(attrName) && "foreach".equals(tagName))
+				{
+					forEachType = validateForEachCollection(project, attr, file, doc, reporter, result,
+						namespace, statementNode);
+					if (forEachType != null)
+					{
+						Node namedItem = attrs.getNamedItem("item");
+						if (namedItem != null)
+						{
+							forEachItem = namedItem.getNodeValue();
+						}
+					}
+				}
 				else if ("id".equals(attrName)
 					&& ("select".equals(tagName) || "update".equals(tagName) || "insert".equals(tagName) || "delete".equals(tagName)))
 				{
-					validateStatementId(element, file, doc, result, project, attr, attrValue);
+					statementNode = element;
+					validateStatementId(element, file, doc, result, project, attr, attrValue, namespace);
 				}
 				else if ("resultMap".equals(attrName) || "resultMap".equals(attrName))
 				{
-					validateResultMapId(project, file, doc, result, attr, attrValue, reporter);
+					validateResultMapId(project, file, doc, result, attr, attrValue, namespace, reporter);
 				}
 				else if ("refid".equals(attrName))
 				{
-					validateSqlId(project, file, doc, result, attr, attrValue, reporter);
+					validateSqlId(project, file, doc, result, attr, attrValue, namespace, reporter);
 				}
 				else if ("select".equals(attrName))
 				{
-					validateSelectId(project, file, doc, result, attr, attrValue, reporter);
+					validateSelectId(project, file, doc, result, attr, attrValue, namespace, reporter);
 				}
 				else if ("namespace".equals(attrName))
 				{
@@ -239,25 +261,27 @@ public class XmlValidator extends AbstractValidator
 		}
 
 		NodeList nodes = element.getChildNodes();
+		boolean hasText = validatableTextTags.contains(element.getNodeName());
 		for (int j = 0; j < nodes.getLength(); j++)
 		{
 			Node child = nodes.item(j);
 			if (child instanceof IDOMElement)
 			{
-				validateElement(project, (IDOMElement)child, file, doc, reporter, result);
+				validateElement(project, (IDOMElement)child, file, doc, reporter, result, namespace,
+					statementNode, forEachItem, forEachType);
 			}
-			else if (child instanceof IDOMText)
+			else if (hasText && child instanceof IDOMText)
 			{
 				validateTextMayContainPropertyRefs(project, (IDOMText)child, file, doc, reporter,
-					result);
+					result, namespace, statementNode, forEachItem, forEachType);
 			}
 		}
 	}
 
-	private void validateTextMayContainPropertyRefs(IJavaProject project, IDOMText child,
-		IFile file, IDOMDocument doc, IReporter reporter, ValidationResult result)
+	private String validateForEachCollection(IJavaProject project, IDOMAttr collectionAttr,
+		IFile file, IDOMDocument doc, IReporter reporter, ValidationResult result,
+		String mapperFqn, Node statementNode)
 	{
-		Node statementNode = MybatipseXmlUtil.findEnclosingStatementNode(child.getParentNode());
 		if (statementNode != null)
 		{
 			// found enclosing statement node
@@ -274,16 +298,50 @@ public class XmlValidator extends AbstractValidator
 			if (statementId != null && !statementId.isEmpty())
 			{
 				// found statmenet id, check method
-				String mapperFqn = null;
-				try
-				{
-					mapperFqn = MybatipseXmlUtil.getNamespace(statementNode.getOwnerDocument());
-				}
-				catch (XPathExpressionException e)
-				{
-					Activator.log(Status.ERROR, e.getMessage(), e);
-				}
 
+				final List<MapperMethodInfo> methodInfos = new ArrayList<MapperMethodInfo>();
+				JavaMapperUtil.findMapperMethod(methodInfos, project, mapperFqn, statementId, true,
+					true);
+
+				if (methodInfos.size() > 0)
+				{
+					// found method, can validate
+					String forEachType = validatePropertyRef(project, methodInfos.get(0).getParams(),
+						mapperFqn + "." + statementId, file, doc, result,
+						collectionAttr.getValueRegionStartOffset(), collectionAttr.getNodeValue(), 0, null,
+						null);
+
+					if (forEachType.endsWith("[]"))
+						forEachType = forEachType.substring(0, forEachType.length() - 2);
+					else if (forEachType.startsWith("java.util.List<"))
+						forEachType = forEachType.substring(15, forEachType.length() - 1);
+					return forEachType;
+				}
+			}
+		}
+		return null;
+	}
+
+	private void validateTextMayContainPropertyRefs(IJavaProject project, IDOMText child,
+		IFile file, IDOMDocument doc, IReporter reporter, ValidationResult result,
+		String mapperFqn, Node statementNode, String forEachItem, String forEachType)
+	{
+		if (statementNode != null)
+		{
+			// found enclosing statement node
+			String statementId = null;
+			NamedNodeMap statementAttrs = statementNode.getAttributes();
+			for (int i = 0; i < statementAttrs.getLength(); i++)
+			{
+				Node attr = statementAttrs.item(i);
+				String attrName = attr.getNodeName();
+				if ("id".equals(attrName))
+					statementId = attr.getNodeValue();
+			}
+
+			if (statementId != null && !statementId.isEmpty())
+			{
+				// found statmenet id, check method
 				final List<MapperMethodInfo> methodInfos = new ArrayList<MapperMethodInfo>();
 				JavaMapperUtil.findMapperMethod(methodInfos, project, mapperFqn, statementId, true,
 					true);
@@ -294,39 +352,62 @@ public class XmlValidator extends AbstractValidator
 					String textContent = child.getTextContent();
 					int startOffset = child.getStartStructuredDocumentRegion().getStartOffset();
 					Matcher matcher = statementTextPropertyRefPattern.matcher(textContent);
+					Map<String, String> paramMap = methodInfos.get(0).getParams();
+					if (forEachItem != null && forEachType != null)
+					{
+						paramMap = new HashMap<String, String>(paramMap);
+						paramMap.put(forEachItem, forEachType);
+					}
 					while (matcher.find())
 					{
 						String property = matcher.group(1);
 						int propertyStartOffset = matcher.start(1);
-						validatePropertyRef(project, methodInfos.get(0).getParams(), mapperFqn + "."
-							+ statementId, file, doc, result, startOffset, property, propertyStartOffset);
+						validatePropertyRef(project, paramMap, mapperFqn + "." + statementId, file, doc,
+							result, startOffset, property, propertyStartOffset, forEachItem, forEachType);
 					}
 				}
 			}
 		}
 	}
 
-	private void validatePropertyRef(IJavaProject project, Map<String, String> paramMap,
+	private String validatePropertyRef(IJavaProject project, Map<String, String> paramMap,
 		String mapperMethod, IFile file, IDOMDocument doc, ValidationResult result,
-		int startOffset, String property, int propertyStartOffset)
+		int startOffset, String property, int propertyStartOffset, String forEachItem,
+		String forEachType)
 	{
 		int propertyLength = property.length();
+
+		String propertyType = null;
 
 		if (paramMap.size() == 1)
 		{
 			// If there is only one parameter with no @Param,
 			// properties should be directly referenced.
 			String paramType = paramMap.values().iterator().next();
+			String paramName = paramMap.keySet().iterator().next();
 			Map<String, String> fields = BeanPropertyCache.searchFields(project, paramType, property,
 				true, -1, true);
 			int lastDot = property.lastIndexOf('.');
 			String matchProperty = lastDot < 0 ? property : property.substring(lastDot + 1);
-			if (!fields.containsKey(matchProperty))
+			if (matchProperty.endsWith("[0]"))
 			{
-				// not valid property
-				addMarker(result, file, doc.getStructuredDocument(), startOffset + propertyStartOffset,
-					propertyLength, property, MISSING_TYPE, IMarker.SEVERITY_ERROR,
-					IMarker.PRIORITY_HIGH, "Property '" + property + "' not found in class " + paramType);
+				matchProperty = matchProperty.substring(0, matchProperty.length() - 3);
+			}
+			propertyType = fields.get(matchProperty);
+			if (propertyType == null)
+			{
+				if (paramName.equals("param1") && lastDot < 0)
+				{
+					// allow anything: non-named parameter, any reference can be resolved
+				}
+				else
+				{
+					// not valid property
+					addMarker(result, file, doc.getStructuredDocument(), startOffset
+						+ propertyStartOffset, propertyLength, property, MISSING_TYPE,
+						IMarker.SEVERITY_ERROR, IMarker.PRIORITY_HIGH, "Property '" + property
+							+ "' not found in class " + paramType);
+				}
 			}
 		}
 		else if (paramMap.size() > 1)
@@ -334,7 +415,12 @@ public class XmlValidator extends AbstractValidator
 			int dotPos = property.indexOf('.');
 			if (dotPos == -1)
 			{
-				if (!paramMap.keySet().contains(property))
+				if (property.endsWith("[0]"))
+				{
+					property = property.substring(0, property.length() - 3);
+				}
+				propertyType = paramMap.get(property);
+				if (propertyType == null)
 				{
 					// not valid parameter
 					addMarker(result, file, doc.getStructuredDocument(), startOffset
@@ -346,8 +432,8 @@ public class XmlValidator extends AbstractValidator
 			else
 			{
 				String paramName = property.substring(0, dotPos);
-				String paramType = paramMap.get(paramName);
-				if (paramType == null)
+				propertyType = paramMap.get(paramName);
+				if (propertyType == null)
 				{
 					// not valid parameter
 					addMarker(result, file, doc.getStructuredDocument(), startOffset
@@ -359,21 +445,28 @@ public class XmlValidator extends AbstractValidator
 				{
 					// check type
 					property = property.substring(dotPos + 1);
-					Map<String, String> fields = BeanPropertyCache.searchFields(project, paramType,
+					Map<String, String> fields = BeanPropertyCache.searchFields(project, propertyType,
 						property, true, -1, true);
 					int lastDot = property.lastIndexOf('.');
 					String matchProperty = lastDot < 0 ? property : property.substring(lastDot + 1);
-					if (!fields.containsKey(matchProperty))
+					if (matchProperty.endsWith("[0]"))
+					{
+						matchProperty = matchProperty.substring(0, matchProperty.length() - 3);
+					}
+					propertyType = fields.get(matchProperty);
+					if (propertyType == null)
 					{
 						// not valid property
 						addMarker(result, file, doc.getStructuredDocument(), startOffset
 							+ propertyStartOffset, propertyLength, property, MISSING_TYPE,
 							IMarker.SEVERITY_ERROR, IMarker.PRIORITY_HIGH, "Property '" + property
-								+ "' not found in class " + paramType);
+								+ "' not found in class " + propertyType);
 					}
 				}
 			}
 		}
+
+		return propertyType;
 	}
 
 	private void validateNamespace(IFile file, IDOMDocument doc, ValidationResult result,
@@ -387,12 +480,13 @@ public class XmlValidator extends AbstractValidator
 	}
 
 	private void validateResultMapId(IJavaProject project, IFile file, IDOMDocument doc,
-		ValidationResult result, IDOMAttr attr, String attrValue, IReporter reporter)
-		throws JavaModelException
+		ValidationResult result, IDOMAttr attr, String attrValue, String namespace,
+		IReporter reporter) throws JavaModelException
 	{
 		if (attrValue.indexOf(',') == -1)
 		{
-			validateReference(project, file, doc, result, attr, attrValue, "resultMap", reporter);
+			validateReference(project, file, doc, result, attr, attrValue, namespace, "resultMap",
+				reporter);
 		}
 		else
 		{
@@ -402,29 +496,31 @@ public class XmlValidator extends AbstractValidator
 				String ref = resultMapRef.trim();
 				if (ref.length() > 0)
 				{
-					validateReference(project, file, doc, result, attr, ref, "resultMap", reporter);
+					validateReference(project, file, doc, result, attr, ref, namespace, "resultMap",
+						reporter);
 				}
 			}
 		}
 	}
 
 	private void validateSelectId(IJavaProject project, IFile file, IDOMDocument doc,
-		ValidationResult result, IDOMAttr attr, String attrValue, IReporter reporter)
-		throws JavaModelException
+		ValidationResult result, IDOMAttr attr, String attrValue, String namespace,
+		IReporter reporter) throws JavaModelException
 	{
-		validateReference(project, file, doc, result, attr, attrValue, "select", reporter);
+		validateReference(project, file, doc, result, attr, attrValue, namespace, "select",
+			reporter);
 	}
 
 	private void validateSqlId(IJavaProject project, IFile file, IDOMDocument doc,
-		ValidationResult result, IDOMAttr attr, String attrValue, IReporter reporter)
-		throws JavaModelException
+		ValidationResult result, IDOMAttr attr, String attrValue, String namespace,
+		IReporter reporter) throws JavaModelException
 	{
-		validateReference(project, file, doc, result, attr, attrValue, "sql", reporter);
+		validateReference(project, file, doc, result, attr, attrValue, namespace, "sql", reporter);
 	}
 
 	private void validateReference(IJavaProject project, IFile file, IDOMDocument doc,
-		ValidationResult result, IDOMAttr attr, String attrValue, String targetElement,
-		IReporter reporter) throws JavaModelException
+		ValidationResult result, IDOMAttr attr, String attrValue, String qualifiedName,
+		String targetElement, IReporter reporter) throws JavaModelException
 	{
 		try
 		{
@@ -436,7 +532,6 @@ public class XmlValidator extends AbstractValidator
 				// Internal reference
 				if ("select".equals(targetElement))
 				{
-					String qualifiedName = MybatipseXmlUtil.getNamespace(doc);
 					if (mapperMethodExists(project, qualifiedName, attrValue))
 					{
 						return;
@@ -487,15 +582,14 @@ public class XmlValidator extends AbstractValidator
 	}
 
 	private void validateStatementId(IDOMElement element, IFile file, IDOMDocument doc,
-		ValidationResult result, IJavaProject project, IDOMAttr attr, String attrValue)
-		throws JavaModelException, XPathExpressionException
+		ValidationResult result, IJavaProject project, IDOMAttr attr, String attrValue,
+		String qualifiedName) throws JavaModelException, XPathExpressionException
 	{
 		if (attrValue == null)
 		{
 			return;
 		}
 
-		String qualifiedName = MybatipseXmlUtil.getNamespace(doc);
 		IType mapperType = project.findType(qualifiedName);
 		if (mapperType != null && !mapperMethodExists(project, qualifiedName, attrValue))
 		{
